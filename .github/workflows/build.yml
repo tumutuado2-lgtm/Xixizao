@@ -1,0 +1,555 @@
+name: Build APK Cronometro
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Criar projeto Android
+        run: |
+          mkdir -p app/src/main/java/com/cronometro/app
+
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "Cronometro"
+          include ':app'
+          EOF
+
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.5.0' apply false
+          }
+          EOF
+
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2g
+          android.useAndroidX=false
+          EOF
+
+          cat > app/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application'
+          }
+          android {
+              namespace 'com.cronometro.app'
+              compileSdk 34
+              defaultConfig {
+                  applicationId "com.cronometro.app"
+                  minSdk 24
+                  targetSdk 33
+                  versionCode 1
+                  versionName "1.0"
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_1_8
+                  targetCompatibility JavaVersion.VERSION_1_8
+              }
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <application
+                  android:label="Cronometro"
+                  android:icon="@android:drawable/ic_lock_idle_alarm"
+                  android:theme="@android:style/Theme.Material.NoActionBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+                  <service
+                      android:name=".FloatService"
+                      android:exported="false" />
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/java/com/cronometro/app/MainActivity.java <<'EOF'
+          package com.cronometro.app;
+
+          import android.app.Activity;
+          import android.content.Intent;
+          import android.content.SharedPreferences;
+          import android.graphics.Color;
+          import android.graphics.drawable.GradientDrawable;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.provider.Settings;
+          import android.view.Gravity;
+          import android.widget.Button;
+          import android.widget.LinearLayout;
+          import android.widget.SeekBar;
+          import android.widget.TextView;
+          import android.widget.Toast;
+
+          public class MainActivity extends Activity {
+
+              SharedPreferences prefs;
+              TextView sizeLabel;
+
+              int dp(int v) {
+                  return (int) (v * getResources().getDisplayMetrics().density);
+              }
+
+              Button makeButton(String text, int fill, int textColor) {
+                  Button b = new Button(this);
+                  b.setText(text);
+                  b.setAllCaps(false);
+                  b.setTextSize(16);
+                  b.setTextColor(textColor);
+                  GradientDrawable g = new GradientDrawable();
+                  g.setColor(fill);
+                  g.setCornerRadius(dp(12));
+                  b.setBackground(g);
+                  LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(
+                          LinearLayout.LayoutParams.MATCH_PARENT, dp(52));
+                  p.topMargin = dp(12);
+                  b.setLayoutParams(p);
+                  return b;
+              }
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  prefs = getSharedPreferences("cfg", MODE_PRIVATE);
+
+                  if (Build.VERSION.SDK_INT >= 33) {
+                      requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 1);
+                  }
+
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setBackgroundColor(0xFF0B0B0B);
+                  root.setPadding(dp(24), dp(48), dp(24), dp(24));
+
+                  TextView title = new TextView(this);
+                  title.setText("Cronômetro");
+                  title.setTextColor(Color.WHITE);
+                  title.setTextSize(26);
+                  title.setTypeface(null, android.graphics.Typeface.BOLD);
+                  root.addView(title);
+
+                  TextView sub = new TextView(this);
+                  sub.setText("Cronômetro flutuante sobre qualquer app");
+                  sub.setTextColor(0xFF8A8A8A);
+                  sub.setTextSize(14);
+                  sub.setPadding(0, dp(4), 0, dp(24));
+                  root.addView(sub);
+
+                  Button open = makeButton("Abrir cronômetro", 0xFF5EE08A, 0xFF000000);
+                  open.setOnClickListener(v -> abrir());
+                  root.addView(open);
+
+                  Button close = makeButton("Fechar cronômetro", 0xFF1E1E1E, 0xFFFFFFFF);
+                  close.setOnClickListener(v -> stopService(new Intent(this, FloatService.class)));
+                  root.addView(close);
+
+                  int size = prefs.getInt("size", 40);
+                  sizeLabel = new TextView(this);
+                  sizeLabel.setTextColor(Color.WHITE);
+                  sizeLabel.setTextSize(15);
+                  sizeLabel.setPadding(0, dp(32), 0, dp(8));
+                  sizeLabel.setText("Tamanho: " + size);
+                  root.addView(sizeLabel);
+
+                  SeekBar bar = new SeekBar(this);
+                  bar.setMax(140);
+                  bar.setProgress(size - 20);
+                  bar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+                      @Override
+                      public void onProgressChanged(SeekBar sb, int p, boolean fromUser) {
+                          int s = p + 20;
+                          prefs.edit().putInt("size", s).apply();
+                          sizeLabel.setText("Tamanho: " + s);
+                          if (FloatService.running) {
+                              Intent i = new Intent(MainActivity.this, FloatService.class);
+                              i.setAction(FloatService.ACTION_REFRESH);
+                              startService(i);
+                          }
+                      }
+                      @Override public void onStartTrackingTouch(SeekBar sb) {}
+                      @Override public void onStopTrackingTouch(SeekBar sb) {}
+                  });
+                  root.addView(bar);
+
+                  TextView help = new TextView(this);
+                  help.setTextColor(0xFF8A8A8A);
+                  help.setTextSize(13);
+                  help.setLineSpacing(0, 1.3f);
+                  help.setPadding(0, dp(32), 0, 0);
+                  help.setText("Como usar\n\n"
+                          + "\u2022 1 toque: iniciar / pausar\n"
+                          + "\u2022 2 toques rápidos: zerar\n"
+                          + "\u2022 Arrastar: mover pela tela\n"
+                          + "\u2022 Segurar: mostrar A\u2212, A+ e \u2715 (tamanho e fechar)");
+                  root.addView(help);
+
+                  setContentView(root);
+              }
+
+              void abrir() {
+                  if (Build.VERSION.SDK_INT >= 23 && !Settings.canDrawOverlays(this)) {
+                      Toast.makeText(this,
+                              "Ative \"Exibir sobre outros apps\" e volte ao app",
+                              Toast.LENGTH_LONG).show();
+                      startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                              Uri.parse("package:" + getPackageName())));
+                      return;
+                  }
+                  Intent i = new Intent(this, FloatService.class);
+                  if (Build.VERSION.SDK_INT >= 26) {
+                      startForegroundService(i);
+                  } else {
+                      startService(i);
+                  }
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/cronometro/app/FloatService.java <<'EOF'
+          package com.cronometro.app;
+
+          import android.app.Notification;
+          import android.app.NotificationChannel;
+          import android.app.NotificationManager;
+          import android.app.PendingIntent;
+          import android.app.Service;
+          import android.content.Intent;
+          import android.content.SharedPreferences;
+          import android.graphics.PixelFormat;
+          import android.graphics.Typeface;
+          import android.graphics.drawable.GradientDrawable;
+          import android.os.Build;
+          import android.os.Handler;
+          import android.os.IBinder;
+          import android.os.Looper;
+          import android.os.SystemClock;
+          import android.util.DisplayMetrics;
+          import android.util.TypedValue;
+          import android.view.Gravity;
+          import android.view.MotionEvent;
+          import android.view.View;
+          import android.view.WindowManager;
+          import android.widget.LinearLayout;
+          import android.widget.TextView;
+
+          import java.util.Locale;
+
+          public class FloatService extends Service {
+
+              static boolean running = false;
+              static final String ACTION_STOP = "com.cronometro.app.STOP";
+              static final String ACTION_REFRESH = "com.cronometro.app.REFRESH";
+
+              WindowManager wm;
+              WindowManager.LayoutParams lp;
+              LinearLayout root, controls;
+              TextView tMain, tMs;
+              SharedPreferences prefs;
+              Handler h = new Handler(Looper.getMainLooper());
+
+              boolean timing = false;
+              long startAt = 0, acc = 0, lastTap = 0;
+
+              float downX, downY;
+              int startX, startY;
+              boolean moved = false, longDone = false;
+
+              Runnable tick = new Runnable() {
+                  @Override
+                  public void run() {
+                      render();
+                      if (timing) h.postDelayed(this, 10);
+                  }
+              };
+
+              Runnable longRun = () -> {
+                  longDone = true;
+                  controls.setVisibility(controls.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE);
+              };
+
+              int dp(int v) {
+                  return (int) (v * getResources().getDisplayMetrics().density);
+              }
+
+              @Override
+              public IBinder onBind(Intent intent) {
+                  return null;
+              }
+
+              @Override
+              public void onCreate() {
+                  super.onCreate();
+                  running = true;
+                  prefs = getSharedPreferences("cfg", MODE_PRIVATE);
+                  wm = (WindowManager) getSystemService(WINDOW_SERVICE);
+                  try {
+                      buildView();
+                  } catch (Exception e) {
+                      stopSelf();
+                  }
+              }
+
+              @Override
+              public int onStartCommand(Intent intent, int flags, int startId) {
+                  startForeground(1, buildNotification());
+                  if (intent != null) {
+                      if (ACTION_STOP.equals(intent.getAction())) {
+                          stopSelf();
+                          return START_NOT_STICKY;
+                      }
+                      if (ACTION_REFRESH.equals(intent.getAction())) {
+                          applySize();
+                      }
+                  }
+                  return START_NOT_STICKY;
+              }
+
+              Notification buildNotification() {
+                  NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+                  Notification.Builder b;
+                  if (Build.VERSION.SDK_INT >= 26) {
+                      NotificationChannel ch = new NotificationChannel("crono", "Cronometro",
+                              NotificationManager.IMPORTANCE_LOW);
+                      nm.createNotificationChannel(ch);
+                      b = new Notification.Builder(this, "crono");
+                  } else {
+                      b = new Notification.Builder(this);
+                  }
+                  Intent si = new Intent(this, FloatService.class).setAction(ACTION_STOP);
+                  PendingIntent pi = PendingIntent.getService(this, 0, si,
+                          PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+                  b.setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
+                          .setContentTitle("Cronômetro ativo")
+                          .setContentText("Toque em Fechar para encerrar")
+                          .addAction(new Notification.Action.Builder(
+                                  android.R.drawable.ic_menu_close_clear_cancel, "Fechar", pi).build());
+                  return b.build();
+              }
+
+              void buildView() {
+                  root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setGravity(Gravity.CENTER_HORIZONTAL);
+                  GradientDrawable bg = new GradientDrawable();
+                  bg.setColor(0xF2000000);
+                  bg.setCornerRadius(dp(10));
+                  root.setBackground(bg);
+                  root.setPadding(dp(14), dp(6), dp(14), dp(6));
+
+                  LinearLayout row = new LinearLayout(this);
+                  row.setOrientation(LinearLayout.HORIZONTAL);
+
+                  tMain = new TextView(this);
+                  tMain.setTextColor(0xFF5EE08A);
+                  tMain.setTypeface(Typeface.create("sans-serif", Typeface.BOLD));
+                  tMain.setFontFeatureSettings("tnum");
+                  tMain.setIncludeFontPadding(false);
+
+                  tMs = new TextView(this);
+                  tMs.setTextColor(0xFFB4EBC6);
+                  tMs.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+                  tMs.setFontFeatureSettings("tnum");
+                  tMs.setIncludeFontPadding(false);
+
+                  row.addView(tMain);
+                  row.addView(tMs);
+                  root.addView(row);
+
+                  controls = new LinearLayout(this);
+                  controls.setOrientation(LinearLayout.HORIZONTAL);
+                  controls.setGravity(Gravity.CENTER);
+                  controls.setVisibility(View.GONE);
+                  controls.setPadding(0, dp(6), 0, dp(2));
+
+                  controls.addView(ctrlButton("A\u2212", v -> changeSize(-6)));
+                  controls.addView(ctrlButton("A+", v -> changeSize(6)));
+                  controls.addView(ctrlButton("\u2715", v -> stopSelf()));
+                  root.addView(controls);
+
+                  applySize();
+                  render();
+
+                  root.setOnTouchListener((v, e) -> {
+                      switch (e.getActionMasked()) {
+                          case MotionEvent.ACTION_DOWN:
+                              startX = lp.x;
+                              startY = lp.y;
+                              downX = e.getRawX();
+                              downY = e.getRawY();
+                              moved = false;
+                              longDone = false;
+                              h.postDelayed(longRun, 500);
+                              return true;
+                          case MotionEvent.ACTION_MOVE:
+                              float mx = e.getRawX() - downX;
+                              float my = e.getRawY() - downY;
+                              if (!moved && Math.hypot(mx, my) > dp(8)) {
+                                  moved = true;
+                                  h.removeCallbacks(longRun);
+                              }
+                              if (moved) {
+                                  DisplayMetrics dm = getResources().getDisplayMetrics();
+                                  int nx = startX + (int) mx;
+                                  int ny = startY + (int) my;
+                                  lp.x = Math.max(0, Math.min(nx, dm.widthPixels - root.getWidth()));
+                                  lp.y = Math.max(0, Math.min(ny, dm.heightPixels - root.getHeight()));
+                                  wm.updateViewLayout(root, lp);
+                              }
+                              return true;
+                          case MotionEvent.ACTION_UP:
+                              h.removeCallbacks(longRun);
+                              if (!moved && !longDone) tap();
+                              return true;
+                          case MotionEvent.ACTION_CANCEL:
+                              h.removeCallbacks(longRun);
+                              return true;
+                      }
+                      return false;
+                  });
+
+                  int type = Build.VERSION.SDK_INT >= 26
+                          ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                          : WindowManager.LayoutParams.TYPE_PHONE;
+                  lp = new WindowManager.LayoutParams(
+                          WindowManager.LayoutParams.WRAP_CONTENT,
+                          WindowManager.LayoutParams.WRAP_CONTENT,
+                          type,
+                          WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                                  | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                          PixelFormat.TRANSLUCENT);
+                  lp.gravity = Gravity.TOP | Gravity.START;
+                  lp.x = dp(20);
+                  lp.y = dp(120);
+                  wm.addView(root, lp);
+              }
+
+              TextView ctrlButton(String text, View.OnClickListener l) {
+                  TextView t = new TextView(this);
+                  t.setText(text);
+                  t.setTextColor(0xFFCCCCCC);
+                  t.setTextSize(16);
+                  t.setGravity(Gravity.CENTER);
+                  GradientDrawable g = new GradientDrawable();
+                  g.setColor(0x33FFFFFF);
+                  g.setCornerRadius(dp(8));
+                  t.setBackground(g);
+                  t.setPadding(dp(12), dp(6), dp(12), dp(6));
+                  LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(
+                          LinearLayout.LayoutParams.WRAP_CONTENT,
+                          LinearLayout.LayoutParams.WRAP_CONTENT);
+                  p.leftMargin = dp(4);
+                  p.rightMargin = dp(4);
+                  t.setLayoutParams(p);
+                  t.setOnClickListener(l);
+                  return t;
+              }
+
+              void changeSize(int delta) {
+                  int s = prefs.getInt("size", 40) + delta;
+                  s = Math.max(20, Math.min(160, s));
+                  prefs.edit().putInt("size", s).apply();
+                  applySize();
+              }
+
+              void applySize() {
+                  int s = prefs.getInt("size", 40);
+                  tMain.setTextSize(TypedValue.COMPLEX_UNIT_SP, s);
+                  tMs.setTextSize(TypedValue.COMPLEX_UNIT_SP, s * 0.55f);
+                  if (root != null && root.isAttachedToWindow()) {
+                      wm.updateViewLayout(root, lp);
+                  }
+              }
+
+              void tap() {
+                  long now = SystemClock.elapsedRealtime();
+                  if (now - lastTap < 300) {
+                      timing = false;
+                      acc = 0;
+                      lastTap = 0;
+                      h.removeCallbacks(tick);
+                      render();
+                      return;
+                  }
+                  lastTap = now;
+                  if (timing) {
+                      acc += now - startAt;
+                      timing = false;
+                      h.removeCallbacks(tick);
+                      render();
+                  } else {
+                      startAt = now;
+                      timing = true;
+                      h.post(tick);
+                  }
+              }
+
+              void render() {
+                  long ms = acc + (timing ? SystemClock.elapsedRealtime() - startAt : 0);
+                  long cs = (ms / 10) % 100;
+                  long totalSec = ms / 1000;
+                  long min = totalSec / 60;
+                  long sec = totalSec % 60;
+                  String main = min > 0
+                          ? String.format(Locale.US, "%d:%02d", min, sec)
+                          : String.valueOf(sec);
+                  tMain.setText(main);
+                  tMs.setText(String.format(Locale.US, ".%02d", cs));
+              }
+
+              @Override
+              public void onDestroy() {
+                  running = false;
+                  h.removeCallbacksAndMessages(null);
+                  try {
+                      if (root != null) wm.removeView(root);
+                  } catch (Exception ignored) {
+                  }
+                  super.onDestroy();
+              }
+          }
+          EOF
+
+      - name: Compilar APK
+        run: gradle assembleDebug --no-daemon
+
+      - name: Enviar APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: cronometro-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
